@@ -1,0 +1,136 @@
+version: "3.4"
+
+services:
+  # Traefik reverse proxy and load balancer
+  traefik:
+    image: "traefik:v2.10"
+    command:
+      - --log.level=DEBUG
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --providers.docker
+      - --api
+      #- --certificatesresolvers.leresolver.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory
+      - --certificatesresolvers.leresolver.acme.email=admin@antiftw.nl
+      - --certificatesresolvers.leresolver.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.leresolver.acme.tlschallenge=true
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    labels:
+      # Dashboard
+      # Config according to https://github.com/traefik-tech-blog/traefik-docker101/blob/main/docker-compose-08.yml
+      - traefik.http.routers.traefik.rule=Host(`monitor.antiftw.nl`)
+      - traefik.http.routers.traefik.service=api@internal
+      - traefik.http.routers.traefik.tls.certresolver=leresolver
+      - traefik.http.routers.traefik.entrypoints=websecure
+      - traefik.http.routers.traefik.middlewares=myauth
+      - traefik.http.middlewares.myauth.basicauth.users=admin:$$apr1$$TVU9c/uv$$QNKKFoqlh10rAe4qygEs8/ # user/password
+
+      # global redirect to https
+      - traefik.http.routers.http-catchall.rule=hostregexp(`{host:.+}`)
+      - traefik.http.routers.http-catchall.entrypoints=web
+      - traefik.http.routers.http-catchall.middlewares=redirect-to-https
+
+      # middleware redirect
+      - traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
+  # Baikal webserver for caldav/carddav
+  baikal:
+    image: ckulka/baikal:nginx
+    container_name: baikal
+    restart: always
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.baikal.rule=Host(`dav.antiftw.nl`)
+      - traefik.http.routers.baikal.entrypoints=websecure
+      - traefik.http.routers.baikal.tls.certresolver=leresolver
+    volumes:
+      - ./baikal/config:/var/www/baikal/config
+      - ./baikal/data:/var/www/baikal/Specific
+  php:
+    image: ${IMAGES_PREFIX:-}app-php
+    build:
+      context: .
+      target: php_prod
+    depends_on:
+      - database
+    restart: unless-stopped
+    volumes:
+      - php_socket:/var/run/php
+    healthcheck:
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    environment:
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+      TRUSTED_HOSTS: ^${SERVER_NAME:-example\.com|localhost}|caddy$$
+      # The two next lines can be removed after initial installation
+      SYMFONY_VERSION: ${SYMFONY_VERSION:-}
+      STABILITY: ${STABILITY:-stable}
+      # Run "composer require symfony/orm-pack" to install and configure Doctrine ORM
+      #DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-!ChangeMe!}@database:5432/${POSTGRES_DB:-app}?serverVersion=${POSTGRES_VERSION:-15}&charset=${POSTGRES_CHARSET:-utf8}
+      DATABASE_URL: mysql://${MARIADB_USER:-antiftw}:${MARIADB_PASSWORD:-!ChangeMe!}@database:3306/${MARIADB_DB:-app}?serverVersion=${MARIADB_VERSION:-mariadb-10.6.0}&charset=${POSTGRES_CHARSET:-utf8}
+
+      # Run "composer require symfony/mercure-bundle" to install and configure the Mercure integration
+      MERCURE_URL: ${CADDY_MERCURE_URL:-http://caddy/.well-known/mercure}
+      APP_SECRET: ${APP_SECRET}
+      MERCURE_JWT_SECRET: ${CADDY_MERCURE_JWT_SECRET}
+
+  caddy:
+    image: ${IMAGES_PREFIX:-}app-caddy
+    build:
+      context: .
+      target: caddy_prod
+    depends_on:
+      - php
+      - database
+    environment:
+      SERVER_NAME: ${SERVER_NAME:-localhost}, caddy:80
+      MERCURE_PUBLISHER_JWT_KEY: ${CADDY_MERCURE_JWT_SECRET}
+      MERCURE_SUBSCRIBER_JWT_KEY: ${CADDY_MERCURE_JWT_SECRET}
+    restart: unless-stopped
+    volumes:
+      - php_socket:/var/run/php
+      - caddy_data:/data
+      - caddy_config:/config
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.baikal.rule=Host(`api.antiftw.nl`)
+      - traefik.http.routers.baikal.entrypoints=websecure
+      - traefik.http.routers.baikal.tls.certresolver=leresolver
+  
+  
+  # Mercure is installed as a Caddy module, prevent the Flex recipe from installing another service
+  ###> symfony/mercure-bundle ###
+  ###< symfony/mercure-bundle ###
+
+  database:
+    image: mariadb:${MARIADB_VERSION:-10.6}
+    ports:
+      - target: 3306
+        published: ${MARIADB_PORT:-3306}
+        protocol: tcp
+    restart: unless-stopped
+    volumes:
+      - database_data:/var/lib/mysql
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-!ChangeMe!}
+      MARIADB_DATABASE: ${MARIADB_DB:-app}
+      MARIADB_USER: ${MARIADB_USER:-antiftw}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:-!ChangeMe!}
+      MARIADB_CHARACTER_SET_SERVER: ${MARIADB_CHARACTER_SET_SERVER:-utf8mb4}
+      MARIADB_COLLATION_SERVER: ${MARIADB_COLLATION_SERVER:-utf8mb4_unicode_ci}
+      MARIADB_INIT_CONNECT: "SET NAMES ${MARIADB_CHARACTER_SET_SERVER} COLLATE ${MARIADB_COLLATION_SERVER}"
+
+
+volumes:
+  php_socket:
+  caddy_data:
+  caddy_config:
+  database_data:
+###> symfony/mercure-bundle ###
+###< symfony/mercure-bundle ###
