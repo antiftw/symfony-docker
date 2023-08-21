@@ -55,6 +55,7 @@ services:
     build:
       context: .
       target: php_prod
+      network: host
     depends_on:
       - database
     restart: unless-stopped
@@ -85,6 +86,7 @@ services:
     build:
       context: .
       target: caddy_prod
+      network: host
     depends_on:
       - php
       - database
